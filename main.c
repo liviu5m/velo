@@ -7,11 +7,20 @@
 #include <errno.h>
 #include <unistd.h>
 #include <poll.h>
+#include <sys/time.h>
 
 #define BUFFER_SIZE 2048
 
 struct pollfd polls[1024];
 int pollId = 1;
+
+struct keyValues {
+	char *key;
+	char *value;
+	long long expireAt;
+};
+int keyCount = 0;
+struct keyValues keys[BUFFER_SIZE];
 
 int parseRespRequest(char *buffer, char * args[]) {
 	int argsCount = 0;
@@ -21,23 +30,48 @@ int parseRespRequest(char *buffer, char * args[]) {
 		char *curr = strstr(buffer, "\r\n");
 		int count = atoi(&buffer[1]);
 		while(argsCount < count && curr != NULL) {
-			curr += 2;
+			curr+=2;
 			if(curr[0] == '$') {
-				curr++;
-				argsSize = atoi(curr);
+				argsSize = atoi(&curr[1]);
 			}else {
 				args[argsCount++] = strndup(curr, argsSize);
 			}
 			curr = strstr(curr, "\r\n");
+			
 		}
 	}
 	return argsCount;
 }
 
+long long get_current_time_ms() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)(tv.tv_sec) * 1000 + (tv.tv_usec / 1000);
+}
+
 void execute(char *args[], int argsCount, char *responseBuffer) {
+	
   if(argsCount > 1 && strcasecmp(args[0], "ECHO") == 0) {
     sprintf(responseBuffer, "$%zu\r\n%s\r\n", strlen(args[1]), args[1]);
-  } else {
+  }else if(strcasecmp(args[0], "SET") == 0) {
+		keys[keyCount].key = strdup(args[1]);
+		keys[keyCount].value = strdup(args[2]);
+		if(argsCount == 3) keys[keyCount].expireAt = 0;
+		else {
+			if(strcasecmp(args[3], "EX") == 0) keys[keyCount].expireAt = get_current_time_ms()+atoi(args[4])*1000;
+			else if(strcasecmp(args[3], "PX") == 0) keys[keyCount].expireAt = get_current_time_ms()+atoi(args[4]);
+		}
+		keyCount++;
+		sprintf(responseBuffer, "+OK\r\n");
+	}else if(strcasecmp(args[0], "GET") == 0) {
+		for(int i = 0;i<keyCount;i++) {
+			if(strcmp(keys[i].key, args[1]) == 0 && (keys[i].expireAt == 0 || keys[i].expireAt > get_current_time_ms())) {
+				sprintf(responseBuffer, "$%zu\r\n%s\r\n", strlen(keys[i].value), keys[i].value);
+				return;
+			}
+		}
+		sprintf(responseBuffer, "$-1\r\n");
+	}else {
     strcpy(responseBuffer, "+PONG\r\n");
   }
 }

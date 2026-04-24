@@ -1,0 +1,62 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <poll.h>
+#include <sys/time.h>
+
+#define BUFFER_SIZE 2048
+
+struct keyValues {
+	char *key;
+	char *value;
+	long long expireAt;
+};
+int keyCount = 0;
+struct keyValues keys[BUFFER_SIZE];
+
+struct listValues {
+	char *key;
+	char *values[BUFFER_SIZE];
+	int valuesCount;
+};
+int listCount = 0;
+struct listValues lists[BUFFER_SIZE];
+
+struct blockedQueue {
+	int clientFd;
+	char *key;
+	long long expireAt;
+};
+int blockedQueuesCount = 0;
+struct blockedQueue blockedQueues[BUFFER_SIZE];
+
+struct pair {
+	char key[BUFFER_SIZE];
+	char value[BUFFER_SIZE];
+};
+
+struct entries {
+	char id[64];
+	struct pair pairs[16];
+	int pairCount;
+};
+
+struct stream {
+	char key[128];
+	struct entries entries[64];
+	int entriesCount;
+};
+int streamCount = 0;
+struct stream streams[100];
+
+
+long long get_current_time_ms() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)(tv.tv_sec) * 1000 + (tv.tv_usec / 1000);
+}

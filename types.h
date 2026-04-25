@@ -40,6 +40,13 @@ struct stream {
   int entriesCount;
 };
 
+struct blockStream {
+	int clientFd;
+	long long miliseconds;
+	int pairsCount;
+	struct pair pairs[16];
+};
+
 extern struct keyValues keys[BUFFER_SIZE];
 extern int keyCount;
 
@@ -51,5 +58,9 @@ extern int streamCount;
 
 extern struct blockedQueue blockedQueues[BUFFER_SIZE];
 extern int blockedQueuesCount;
+
+extern int blocksStreamCount;
+extern struct blockStream blocksStream[100];
+
 long long get_current_time_ms();
 #endif

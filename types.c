@@ -54,6 +54,14 @@ struct stream {
 int streamCount = 0;
 struct stream streams[100];
 
+struct blockStream {
+	int clientFd;
+	long long miliseconds;
+	int pairsCount;
+	struct pair pairs[16];
+};
+int blocksStreamCount = 0;
+struct blockStream blocksStream[100];
 
 long long get_current_time_ms() {
     struct timeval tv;

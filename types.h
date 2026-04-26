@@ -2,9 +2,9 @@
 #define TYPES_H
 
 #include <sys/time.h>
+#include <stdbool.h>
 
 #define BUFFER_SIZE 2048
-
 struct keyValues {
   char *key;
   char *value;
@@ -46,6 +46,18 @@ struct blockStream {
 	int pairsCount;
 	struct pair pairs[16];
 };
+struct multiQueue {
+	int clientFd;
+	char *args[128];
+	int argsCount;
+};
+
+struct clientSession {
+	bool isActiveMultiQueue;
+	struct multiQueue multiQueues[128];
+	int multiQueuesCount;
+};
+
 
 extern struct keyValues keys[BUFFER_SIZE];
 extern int keyCount;
@@ -61,6 +73,15 @@ extern int blockedQueuesCount;
 
 extern int blocksStreamCount;
 extern struct blockStream blocksStream[100];
+
+extern struct multiQueue multiQueues[128];
+extern int multiQueuesCount;
+extern bool isActiveMultiQueue;
+
+
+extern struct pollfd polls[1024];
+extern struct clientSession clientSessions[1024];
+extern int pollId;
 
 long long get_current_time_ms();
 #endif

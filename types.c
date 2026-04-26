@@ -8,8 +8,14 @@
 #include <unistd.h>
 #include <poll.h>
 #include <sys/time.h>
+#include <stdbool.h>
 
 #define BUFFER_SIZE 2048
+
+
+
+struct pollfd polls[1024];
+int pollId = 1;
 
 struct keyValues {
 	char *key;
@@ -40,6 +46,8 @@ struct pair {
 	char value[BUFFER_SIZE];
 };
 
+
+
 struct entries {
 	char id[64];
 	struct pair pairs[16];
@@ -62,6 +70,20 @@ struct blockStream {
 };
 int blocksStreamCount = 0;
 struct blockStream blocksStream[100];
+
+
+struct multiQueue {
+	int clientFd;
+	char *args[128];
+	int argsCount;
+};
+
+struct clientSession {
+	bool isActiveMultiQueue;
+	struct multiQueue multiQueues[128];
+	int multiQueuesCount;
+};
+struct clientSession clientSessions[1024];
 
 long long get_current_time_ms() {
     struct timeval tv;

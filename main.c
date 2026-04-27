@@ -44,26 +44,78 @@ int parseRespRequest(char *buffer, char *args[]) {
 	return argsCount;
 }
 
+void notifiyKeyChange(char *key, struct clientSession *currentClient) {
+	for(int i = 0;i<pollId;i++) {
+		struct clientSession *clientSession = &clientSessions[i];
+		if(currentClient == clientSession) continue;
+		for(int j = 0;j<clientSession->watchedKeysCount;j++) {
+			if(strcmp(clientSession->watchedKeys[j], key) == 0) {
+				clientSession->isKeyChanged = true;
+				break;
+			}
+		}
+	}
+}
+
+void unwatch(struct clientSession *clientSession) {
+	for(int i = 0;i<clientSession->watchedKeysCount;i++) {
+		free(clientSession->watchedKeys[i]);
+	}
+	clientSession->watchedKeysCount = 0;
+	clientSession->isKeyChanged = false;
+}
+
+void discard(struct clientSession *clientSession) {
+	clientSession->isActiveMultiQueue = false;
+	for(int i = 0;i<clientSession->multiQueuesCount;i++) {
+		for (int j = 0; j < clientSession->multiQueues[i].argsCount; j++) {
+			free(clientSession->multiQueues[i].args[j]);
+		}
+		clientSession->multiQueues[i].argsCount = 0;
+		clientSession->multiQueues[i].clientFd = -1;
+	}
+	clientSession->multiQueuesCount = 0;
+}
+
 void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, struct clientSession *clientSession) {
-	if(strcasecmp(args[0], "DISCARD") == 0) {
-		if(!clientSession->isActiveMultiQueue) {
-			sprintf(responseBuffer, "-ERR DISCARD without MULTI\r\n");
+
+	if(strcasecmp(args[0], "UNWATCH") == 0) {
+		unwatch(clientSession);
+		sprintf(responseBuffer, "+OK\r\n");
+		return;
+	}else if(strcasecmp(args[0], "WATCH") == 0) {
+		if(clientSession->isActiveMultiQueue) {
+			sprintf(responseBuffer, "-ERR WATCH inside MULTI is not allowed\r\n");
 			return;
 		}
-		clientSession->isActiveMultiQueue = false;
-		for(int i = 0;i<clientSession->multiQueuesCount;i++) {
-			for (int j = 0; j < clientSession->multiQueues[i].argsCount; j++) {
-				free(clientSession->multiQueues[i].args[j]);
-			}
-			clientSession->multiQueues[i].argsCount = 0;
-			clientSession->multiQueues[i].clientFd = -1;
+		for(int i = 1;i<argsCount;i++) {
+			clientSession->watchedKeys[clientSession->watchedKeysCount++] = strdup(args[i]);
 		}
-		clientSession->multiQueuesCount = 0;
 		sprintf(responseBuffer, "+OK\r\n");
+		return;
+	} else if(strcasecmp(args[0], "DISCARD") == 0) {
+		if(!clientSession->isActiveMultiQueue) {
+			sprintf(responseBuffer, "-ERR DISCARD without MULTI\r\n");
+			unwatch(clientSession);
+			return;
+		}
+		discard(clientSession);
+		sprintf(responseBuffer, "+OK\r\n");
+		unwatch(clientSession);
 		return;
 	}else	if(strcasecmp(args[0], "EXEC") == 0) {
 		if(!clientSession->isActiveMultiQueue) {
 			sprintf(responseBuffer, "-ERR EXEC without MULTI\r\n");
+			unwatch(clientSession);
+			discard(clientSession);
+			return;
+		}
+		if(clientSession->isKeyChanged) {
+			sprintf(responseBuffer, "*-1\r\n");
+			clientSession->isActiveMultiQueue = false;
+			clientSession->isKeyChanged = false;
+			unwatch(clientSession);
+			discard(clientSession);
 			return;
 		}
 		clientSession->isActiveMultiQueue = false;
@@ -73,6 +125,7 @@ void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, st
 		for(int i = 0;i<count;i++) {
 			char tempResponse[BUFFER_SIZE];
 			tempResponse[0] = '\0';
+			printf("Executing command from multi queue: %s \n", clientSession->multiQueues[i].args[0]);
 			execute(clientSession->multiQueues[i].args, clientSession->multiQueues[i].argsCount, tempResponse, clientSession->multiQueues[i].clientFd,clientSession);
 			strcat(responseBuffer, tempResponse);
 			for (int j = 0; j < clientSession->multiQueues[i].argsCount; j++) {
@@ -81,6 +134,7 @@ void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, st
 			clientSession->multiQueues[i].argsCount = 0;
 			clientSession->multiQueues[i].clientFd = -1;
 		}
+		unwatch(clientSession);
 		return;
 	}
 	if(clientSession->isActiveMultiQueue && strcasecmp(args[0], "MULTI") != 0) {
@@ -100,14 +154,23 @@ void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, st
   if(argsCount > 1 && strcasecmp(args[0], "ECHO") == 0) {
     sprintf(responseBuffer, "$%zu\r\n%s\r\n", strlen(args[1]), args[1]);
   }else if(strcasecmp(args[0], "SET") == 0) {
-		keys[keyCount].key = strdup(args[1]);
-		keys[keyCount].value = strdup(args[2]);
-		if(argsCount == 3) keys[keyCount].expireAt = 0;
-		else {
-			if(strcasecmp(args[3], "EX") == 0) keys[keyCount].expireAt = get_current_time_ms()+atoi(args[4])*1000;
-			else if(strcasecmp(args[3], "PX") == 0) keys[keyCount].expireAt = get_current_time_ms()+atoi(args[4]);
+		notifiyKeyChange(args[1], clientSession);
+		int foundId = -1;
+		for(int i = 0;i<keyCount;i++) {
+			if(strcmp(args[1], keys[i].key) == 0) {
+				foundId = i;
+				break;
+			}
 		}
-		keyCount++;
+		if(foundId == -1) foundId = keyCount;
+		keys[foundId].key = strdup(args[1]);
+		keys[foundId].value = strdup(args[2]);
+		if(argsCount == 3) keys[foundId].expireAt = 0;
+		else {
+			if(strcasecmp(args[3], "EX") == 0) keys[foundId].expireAt = get_current_time_ms()+atoi(args[4])*1000;
+			else if(strcasecmp(args[3], "PX") == 0) keys[foundId].expireAt = get_current_time_ms()+atoi(args[4]);
+		}
+		if(foundId == keyCount) keyCount++;
 		sprintf(responseBuffer, "+OK\r\n");
 	}else if(strcasecmp(args[0], "GET") == 0) {
 		for(int i = 0;i<keyCount;i++) {
@@ -132,6 +195,7 @@ void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, st
 		}
 		sprintf(responseBuffer, "+none\r\n");
 	}else if(strcasecmp(args[0], "INCR") == 0) {
+		notifiyKeyChange(args[1], clientSession);
 		for(int i = 0;i<keyCount;i++) {
 			printf("Checking key: %s\n", keys[i].key);
 			if(strcmp(args[1], keys[i].key) == 0 && (keys[i].expireAt == 0 || keys[i].expireAt > get_current_time_ms())) {
@@ -223,6 +287,8 @@ int main() {
 					polls[pollId].events = POLLIN;
 					clientSessions[pollId].isActiveMultiQueue = false;
 					clientSessions[pollId].multiQueuesCount = 0;
+					clientSessions[pollId].watchedKeysCount = 0;
+					clientSessions[pollId].isKeyChanged = false;
 					pollId++;
 					
 					printf("Client connected\n");

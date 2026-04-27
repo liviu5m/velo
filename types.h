@@ -56,6 +56,9 @@ struct clientSession {
 	bool isActiveMultiQueue;
 	struct multiQueue multiQueues[128];
 	int multiQueuesCount;
+  bool isKeyChanged;
+	char *watchedKeys[128];
+	int watchedKeysCount;
 };
 
 

@@ -59,6 +59,7 @@ struct clientSession {
   bool isKeyChanged;
 	char *watchedKeys[128];
 	int watchedKeysCount;
+  int masterFd;
 };
 
 

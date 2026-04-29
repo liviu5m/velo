@@ -9,228 +9,84 @@
 #include <poll.h>
 #include <sys/time.h>
 #include <stdbool.h>
+#include <arpa/inet.h>
 #include "lists.h"
 #include "types.h"
 #include "streams.h"
+#include "commands.h"
 
 #define BUFFER_SIZE 2048
 
-int parseRespRequest(char *buffer, char *args[]) {
-	int argsCount = 0;
-	if (buffer[0] != '*') return 0;
-
-	char *curr = strstr(buffer, "\r\n");
-	if (!curr) return 0;
-	curr += 2;
-
-	int totalArgs = atoi(&buffer[1]);
-
-	while (argsCount < totalArgs && curr != NULL) {
-		if (curr[0] == '$') {
-			int argsSize = atoi(&curr[1]);
-			
-			curr = strstr(curr, "\r\n");
-			if (!curr) break;
-			curr += 2;
-
-			args[argsCount++] = strndup(curr, argsSize);
-
-			curr = strstr(curr, "\r\n");
-			if (curr) curr += 2;
-		} else {
-			break;
-		}
-	}
-	return argsCount;
-}
-
-void notifiyKeyChange(char *key, struct clientSession *currentClient) {
-	for(int i = 0;i<pollId;i++) {
-		struct clientSession *clientSession = &clientSessions[i];
-		if(currentClient == clientSession) continue;
-		for(int j = 0;j<clientSession->watchedKeysCount;j++) {
-			if(strcmp(clientSession->watchedKeys[j], key) == 0) {
-				clientSession->isKeyChanged = true;
-				break;
-			}
-		}
-	}
-}
-
-void unwatch(struct clientSession *clientSession) {
-	for(int i = 0;i<clientSession->watchedKeysCount;i++) {
-		free(clientSession->watchedKeys[i]);
-	}
-	clientSession->watchedKeysCount = 0;
-	clientSession->isKeyChanged = false;
-}
-
-void discard(struct clientSession *clientSession) {
-	clientSession->isActiveMultiQueue = false;
-	for(int i = 0;i<clientSession->multiQueuesCount;i++) {
-		for (int j = 0; j < clientSession->multiQueues[i].argsCount; j++) {
-			free(clientSession->multiQueues[i].args[j]);
-		}
-		clientSession->multiQueues[i].argsCount = 0;
-		clientSession->multiQueues[i].clientFd = -1;
-	}
-	clientSession->multiQueuesCount = 0;
-}
+int port = 6379;
+char *serverRole = "master";
+char *masterReplicationId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+char *masterReplicationOffset = "0";
+char *masterHost;
+char *masterPort;
+int replicaFds[100];
+int replicaCount = 0;
 
 void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, struct clientSession *clientSession) {
+	int status = 0;
+	if(strcasecmp(args[0], "UNWATCH") == 0) 
+		status = unwatchFunc(responseBuffer, clientSession);
 
-	if(strcasecmp(args[0], "UNWATCH") == 0) {
-		unwatch(clientSession);
-		sprintf(responseBuffer, "+OK\r\n");
-		return;
-	}else if(strcasecmp(args[0], "WATCH") == 0) {
-		if(clientSession->isActiveMultiQueue) {
-			sprintf(responseBuffer, "-ERR WATCH inside MULTI is not allowed\r\n");
-			return;
-		}
-		for(int i = 1;i<argsCount;i++) {
-			clientSession->watchedKeys[clientSession->watchedKeysCount++] = strdup(args[i]);
-		}
-		sprintf(responseBuffer, "+OK\r\n");
-		return;
-	} else if(strcasecmp(args[0], "DISCARD") == 0) {
-		if(!clientSession->isActiveMultiQueue) {
-			sprintf(responseBuffer, "-ERR DISCARD without MULTI\r\n");
-			unwatch(clientSession);
-			return;
-		}
-		discard(clientSession);
-		sprintf(responseBuffer, "+OK\r\n");
-		unwatch(clientSession);
-		return;
-	}else	if(strcasecmp(args[0], "EXEC") == 0) {
-		if(!clientSession->isActiveMultiQueue) {
-			sprintf(responseBuffer, "-ERR EXEC without MULTI\r\n");
-			unwatch(clientSession);
-			discard(clientSession);
-			return;
-		}
-		if(clientSession->isKeyChanged) {
-			sprintf(responseBuffer, "*-1\r\n");
-			clientSession->isActiveMultiQueue = false;
-			clientSession->isKeyChanged = false;
-			unwatch(clientSession);
-			discard(clientSession);
-			return;
-		}
-		clientSession->isActiveMultiQueue = false;
-		int count = clientSession->multiQueuesCount;
-		clientSession->multiQueuesCount = 0;
-		sprintf(responseBuffer, "*%d\r\n", count);
-		for(int i = 0;i<count;i++) {
-			char tempResponse[BUFFER_SIZE];
-			tempResponse[0] = '\0';
-			printf("Executing command from multi queue: %s \n", clientSession->multiQueues[i].args[0]);
-			execute(clientSession->multiQueues[i].args, clientSession->multiQueues[i].argsCount, tempResponse, clientSession->multiQueues[i].clientFd,clientSession);
-			strcat(responseBuffer, tempResponse);
-			for (int j = 0; j < clientSession->multiQueues[i].argsCount; j++) {
-				free(clientSession->multiQueues[i].args[j]);
-			}
-			clientSession->multiQueues[i].argsCount = 0;
-			clientSession->multiQueues[i].clientFd = -1;
-		}
-		unwatch(clientSession);
-		return;
-	}
-	if(clientSession->isActiveMultiQueue && strcasecmp(args[0], "MULTI") != 0) {
-		for(int i = 0;i<argsCount;i++) {
-			clientSession->multiQueues[clientSession->multiQueuesCount].args[i] = strdup(args[i]);
-		}
-		clientSession->multiQueues[clientSession->multiQueuesCount].argsCount = argsCount;
-		clientSession->multiQueues[clientSession->multiQueuesCount].clientFd = clientFd;
-		clientSession->multiQueuesCount++;
-		sprintf(responseBuffer, "+QUEUED\r\n");
-		return;
-	}
-	int status = executeLists(args, argsCount, responseBuffer, clientFd);
+	else if(strcasecmp(args[0], "WATCH") == 0) 
+		status = watch(args, argsCount, responseBuffer, clientSession);	
+
+	else if(strcasecmp(args[0], "DISCARD") == 0) 
+		status = discardFunc(responseBuffer, clientSession);	
+
+	else	if(strcasecmp(args[0], "EXEC") == 0) 
+		status = exec(responseBuffer, clientSession);
+
+	else if(clientSession->isActiveMultiQueue && strcasecmp(args[0], "MULTI") != 0)
+		status = multiQueue(args, argsCount, responseBuffer, clientSession, clientFd);
+	
+	if(status == 1) return;
+
+	status = executeLists(args, argsCount, responseBuffer, clientFd);
 	if(status == 1) return;
 	status = executeStreams(args, argsCount, responseBuffer, clientFd);
 	if(status == 1) return;
-  if(argsCount > 1 && strcasecmp(args[0], "ECHO") == 0) {
-    sprintf(responseBuffer, "$%zu\r\n%s\r\n", strlen(args[1]), args[1]);
-  }else if(strcasecmp(args[0], "SET") == 0) {
-		notifiyKeyChange(args[1], clientSession);
-		int foundId = -1;
-		for(int i = 0;i<keyCount;i++) {
-			if(strcmp(args[1], keys[i].key) == 0) {
-				foundId = i;
-				break;
-			}
-		}
-		if(foundId == -1) foundId = keyCount;
-		keys[foundId].key = strdup(args[1]);
-		keys[foundId].value = strdup(args[2]);
-		if(argsCount == 3) keys[foundId].expireAt = 0;
-		else {
-			if(strcasecmp(args[3], "EX") == 0) keys[foundId].expireAt = get_current_time_ms()+atoi(args[4])*1000;
-			else if(strcasecmp(args[3], "PX") == 0) keys[foundId].expireAt = get_current_time_ms()+atoi(args[4]);
-		}
-		if(foundId == keyCount) keyCount++;
-		sprintf(responseBuffer, "+OK\r\n");
-	}else if(strcasecmp(args[0], "GET") == 0) {
-		for(int i = 0;i<keyCount;i++) {
-			if(strcmp(keys[i].key, args[1]) == 0 && (keys[i].expireAt == 0 || keys[i].expireAt > get_current_time_ms())) {
-				sprintf(responseBuffer, "$%zu\r\n%s\r\n", strlen(keys[i].value), keys[i].value);
-				return;
-			}
-		}
-		sprintf(responseBuffer, "$-1\r\n");
-	}else if(strcasecmp(args[0], "TYPE") == 0) {
-		for(int i = 0;i<keyCount;i++) {
-			if(strcmp(args[1], keys[i].key) == 0) {
-				sprintf(responseBuffer, "+string\r\n");
-				return;
-			}
-		}
-		for(int i = 0;i<streamCount;i++) {
-			if(strcmp(args[1], streams[i].key) == 0) {
-				sprintf(responseBuffer, "+stream\r\n");
-				return;
-			}
-		}
-		sprintf(responseBuffer, "+none\r\n");
-	}else if(strcasecmp(args[0], "INCR") == 0) {
-		notifiyKeyChange(args[1], clientSession);
-		for(int i = 0;i<keyCount;i++) {
-			printf("Checking key: %s\n", keys[i].key);
-			if(strcmp(args[1], keys[i].key) == 0 && (keys[i].expireAt == 0 || keys[i].expireAt > get_current_time_ms())) {
-				if(atoll(keys[i].value) != 0) {
-					long long value = atoll(keys[i].value);
-					value++;
-					sprintf(keys[i].value, "%lld", value);
-					sprintf(responseBuffer, ":%lld\r\n", value);
-					return;
-				}else {
-					sprintf(responseBuffer, "-ERR value is not an integer or out of range\r\n");
-					return;
-				}
-			}
-		}
-		keys[keyCount].key = strdup(args[1]);
-		keys[keyCount].value = strdup("1");	
-		keys[keyCount].expireAt = 0;
-		keyCount++;
-		sprintf(responseBuffer, ":1\r\n");
-	}else if(strcasecmp(args[0], "MULTI") == 0) {
-		if(clientSession->isActiveMultiQueue) {
-			sprintf(responseBuffer, "-ERR MULTI calls can not be nested\r\n");
-			return;
-		}
-		clientSession->multiQueues[clientSession->multiQueuesCount].clientFd = clientFd;
-		clientSession->multiQueues[clientSession->multiQueuesCount].argsCount = 0;
-		clientSession->isActiveMultiQueue = true;
-		sprintf(responseBuffer, "+OK\r\n");
-	}else {
-    strcpy(responseBuffer, "+PONG\r\n");
-  }
+
+  if(argsCount > 1 && strcasecmp(args[0], "ECHO") == 0) 
+		echo(args, argsCount, responseBuffer);
+
+  else if(strcasecmp(args[0], "SET") == 0) {
+		set(args, argsCount, responseBuffer, clientSession);
+		if (strcmp(serverRole, "master") == 0) {
+      propagate(args, argsCount, replicaFds, replicaCount);
+    }
+	}
+
+	else if(strcasecmp(args[0], "GET") == 0) 
+		get(args, argsCount, responseBuffer, clientSession);	
+
+	else if(strcasecmp(args[0], "TYPE") == 0) 
+		type(args, argsCount, responseBuffer, clientSession);	
+
+	else if(strcasecmp(args[0], "INCR") == 0) 
+		incr(args, argsCount, responseBuffer, clientSession);
+
+	else if(strcasecmp(args[0], "MULTI") == 0) 
+		multi(responseBuffer, clientSession, clientFd);
+
+	else if(strcasecmp(args[0], "INFO") == 0) 
+		info(serverRole, masterReplicationId, masterReplicationOffset, responseBuffer);
+
+	else if(strcasecmp(args[0], "REPLCONF") == 0) 
+		replconf(responseBuffer);
+
+	else if(strcasecmp(args[0],"PSYNC") == 0) 
+		psync(responseBuffer, masterReplicationId, clientFd, replicaFds, &replicaCount);
+
+	else 
+		pong(responseBuffer);
+  
 }
 
-int main() {
+int main(int argc, char *argv[]) {
 
   setbuf(stdout, NULL);
 	setbuf(stderr, NULL);
@@ -246,16 +102,75 @@ int main() {
 		printf("SO_REUSEADDR failed: %s \n", strerror(errno));
 		return 1;
 	}
-
+	for(int i = 0;i<argc;i++) {
+		if(strcmp(argv[i], "--port") == 0) {
+			port = atoi(argv[i+1]);
+			i++;
+		}else if(strcmp(argv[i], "--replicaof") == 0) {
+			serverRole = "slave";
+			char *hostPort = argv[i+1];
+			char *colon = strchr(hostPort, ' ');
+			if(colon) {
+				*colon = '\0';
+				masterHost = hostPort;
+				masterPort = colon + 1;
+			}
+			i++;
+		}
+	}
+	printf("Starting server on port %d...\n", port);
   struct sockaddr_in servAddr;
   servAddr.sin_family = AF_INET;
-  servAddr.sin_port = htons(6379);
+  servAddr.sin_port = htons(port);
   servAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	
 	if (bind(serverFd, (struct sockaddr *) &servAddr, sizeof(servAddr)) != 0) {
 		printf("Bind failed: %s \n", strerror(errno));
 		return 1;
 	}
+
+	if (strcmp(serverRole, "slave") == 0) {
+		printf("Hello, I am a replica. Connecting to master at %s:%s...\n", masterHost, masterPort);
+    int masterFd = socket(AF_INET, SOCK_STREAM, 0);
+    
+    struct sockaddr_in master_addr;
+    master_addr.sin_family = AF_INET;
+    master_addr.sin_port = htons(atoi(masterPort)); 
+    inet_pton(AF_INET, "127.0.0.1", &master_addr.sin_addr);
+
+    if (connect(masterFd, (struct sockaddr *)&master_addr, sizeof(master_addr)) == 0) {
+			printf("Connected to master. Sending PING...\n");
+			char *ping = "*1\r\n$4\r\nPING\r\n";
+			char replConfigPort[256];
+			int lenPort = 0, tempPort = port;
+			while(tempPort) {
+				lenPort++;
+				tempPort /= 10;
+			}
+			char responseBuffer[BUFFER_SIZE];
+			sprintf(replConfigPort, "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$%d\r\n%d\r\n", lenPort, port);
+			char *replCapaSync = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+			send(masterFd, ping, strlen(ping), 0);
+			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0);
+			send(masterFd, replConfigPort, strlen(replConfigPort), 0);
+			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0); 
+			send(masterFd, replCapaSync, strlen(replCapaSync), 0);
+			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0); 
+			char *token = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+			send(masterFd, token, strlen(token), 0);
+			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0);
+			polls[pollId].fd = masterFd;
+			polls[pollId].events = POLLIN;
+			clientSessions[pollId].isActiveMultiQueue = false;
+			clientSessions[pollId].multiQueuesCount = 0;
+			clientSessions[pollId].watchedKeysCount = 0;
+			clientSessions[pollId].isKeyChanged = false;
+			clientSessions[pollId].masterFd = masterFd;
+			pollId++;
+    } else {
+			printf("Connection to master failed: %s\n", strerror(errno));
+    }
+}
 
   int connection_backlog = 5;
 	if (listen(serverFd, connection_backlog) != 0) {
@@ -289,6 +204,7 @@ int main() {
 					clientSessions[pollId].multiQueuesCount = 0;
 					clientSessions[pollId].watchedKeysCount = 0;
 					clientSessions[pollId].isKeyChanged = false;
+					clientSessions[pollId].masterFd = -1;
 					pollId++;
 					
 					printf("Client connected\n");
@@ -304,19 +220,30 @@ int main() {
 						i--;
 					}else {
 						buffer[bytes] = '\0';
-						char *args[1024];
-						int argsCount = parseRespRequest(buffer, args);
-						if (argsCount > 0) {
-							char responseBuffer[BUFFER_SIZE]; 
-							responseBuffer[0] = '\0';
-							execute(args, argsCount, responseBuffer,polls[i].fd, &clientSessions[i]);
-							if(responseBuffer[0] != '\0') {
-								write(polls[i].fd, responseBuffer, strlen(responseBuffer));								
-							}
-							for(int j = 0; j < argsCount; j++) {
-								free(args[j]);
-							}
-						}
+						char *currentPos = buffer;
+
+            while (currentPos != NULL && *currentPos != '\0') {
+              char *args[1024];
+              
+              int argsCount = parseRespRequest(currentPos, args);
+              
+              if (argsCount > 0) {
+                char responseBuffer[BUFFER_SIZE];
+                responseBuffer[0] = '\0';
+                
+                execute(args, argsCount, responseBuffer, polls[i].fd, &clientSessions[i]);
+                
+                if (responseBuffer[0] != '\0' && clientSessions[i].masterFd == polls[i].fd) {
+                  write(polls[i].fd, responseBuffer, strlen(responseBuffer));
+                }
+
+                for (int j = 0; j < argsCount; j++) {
+                  free(args[j]);
+                }
+              }
+
+              currentPos = strchr(currentPos + 1, '*');
+            }
 					}
 				}
 			}

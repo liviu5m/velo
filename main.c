@@ -23,8 +23,10 @@ char *masterReplicationId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 char *masterReplicationOffset = "0";
 char *masterHost;
 char *masterPort;
+int serverMasterFd = -1;
 int replicaFds[100];
 int replicaCount = 0;
+int replicaOffset = 0;
 
 void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, struct clientSession *clientSession) {
 	int status = 0;
@@ -76,7 +78,7 @@ void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, st
 		info(serverRole, masterReplicationId, masterReplicationOffset, responseBuffer);
 
 	else if(strcasecmp(args[0], "REPLCONF") == 0) 
-		replconf(responseBuffer);
+		replconf(responseBuffer, args, argsCount, replicaOffset);
 
 	else if(strcasecmp(args[0],"PSYNC") == 0) 
 		psync(responseBuffer, masterReplicationId, clientFd, replicaFds, &replicaCount);
@@ -84,6 +86,16 @@ void execute(char *args[], int argsCount, char *responseBuffer, int clientFd, st
 	else 
 		pong(responseBuffer);
   
+}
+
+int calculateCommandBytes(char *args[], int argsCount) {
+    int total = 0;
+    total += 1 + snprintf(NULL, 0, "%d", argsCount) + 2;
+    for (int i = 0; i < argsCount; i++) {
+        total += 1 + snprintf(NULL, 0, "%zu", strlen(args[i])) + 2;
+        total += strlen(args[i]) + 2;
+    }
+    return total;
 }
 
 int main(int argc, char *argv[]) {
@@ -130,7 +142,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (strcmp(serverRole, "slave") == 0) {
-		printf("Hello, I am a replica. Connecting to master at %s:%s...\n", masterHost, masterPort);
+    printf("Hello, I am a replica. Connecting to master at %s:%s...\n", masterHost, masterPort);
     int masterFd = socket(AF_INET, SOCK_STREAM, 0);
     
     struct sockaddr_in master_addr;
@@ -139,40 +151,40 @@ int main(int argc, char *argv[]) {
     inet_pton(AF_INET, "127.0.0.1", &master_addr.sin_addr);
 
     if (connect(masterFd, (struct sockaddr *)&master_addr, sizeof(master_addr)) == 0) {
-			printf("Connected to master. Sending PING...\n");
-			char *ping = "*1\r\n$4\r\nPING\r\n";
-			char replConfigPort[256];
-			int lenPort = 0, tempPort = port;
-			while(tempPort) {
-				lenPort++;
-				tempPort /= 10;
-			}
-			char responseBuffer[BUFFER_SIZE];
-			sprintf(replConfigPort, "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$%d\r\n%d\r\n", lenPort, port);
-			char *replCapaSync = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-			send(masterFd, ping, strlen(ping), 0);
-			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0);
-			send(masterFd, replConfigPort, strlen(replConfigPort), 0);
-			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0); 
-			send(masterFd, replCapaSync, strlen(replCapaSync), 0);
-			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0); 
-			char *token = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-			send(masterFd, token, strlen(token), 0);
-			recv(masterFd, responseBuffer, sizeof(responseBuffer), 0);
-			polls[pollId].fd = masterFd;
-			polls[pollId].events = POLLIN;
-			clientSessions[pollId].isActiveMultiQueue = false;
-			clientSessions[pollId].multiQueuesCount = 0;
-			clientSessions[pollId].watchedKeysCount = 0;
-			clientSessions[pollId].isKeyChanged = false;
-			clientSessions[pollId].masterFd = masterFd;
-			pollId++;
+        printf("Connected to master. Sending PING...\n");
+        char responseBuffer[BUFFER_SIZE];
+        
+        char *ping = "*1\r\n$4\r\nPING\r\n";
+        send(masterFd, ping, strlen(ping), 0);
+        recv(masterFd, responseBuffer, sizeof(responseBuffer), 0);
+        
+        char replConfigPort[256];
+        int lenPort = 0, tempPort = port;
+        while(tempPort) {
+            lenPort++;
+            tempPort /= 10;
+        }
+        sprintf(replConfigPort, "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$%d\r\n%d\r\n", lenPort, port);
+        send(masterFd, replConfigPort, strlen(replConfigPort), 0);
+        recv(masterFd, responseBuffer, sizeof(responseBuffer), 0);
+        
+        char *replCapaSync = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+        send(masterFd, replCapaSync, strlen(replCapaSync), 0);
+        recv(masterFd, responseBuffer, sizeof(responseBuffer), 0);
+        
+        char *token = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+        send(masterFd, token, strlen(token), 0);
+        
+        polls[pollId].fd = masterFd;
+        polls[pollId].events = POLLIN;
+        serverMasterFd = masterFd;
+        pollId++;
     } else {
-			printf("Connection to master failed: %s\n", strerror(errno));
+        printf("Connection to master failed: %s\n", strerror(errno));
     }
-}
-
-  int connection_backlog = 5;
+	}
+  
+	int connection_backlog = 5;
 	if (listen(serverFd, connection_backlog) != 0) {
 		printf("Listen failed: %s \n", strerror(errno));
 		return 1;
@@ -221,29 +233,68 @@ int main(int argc, char *argv[]) {
 					}else {
 						buffer[bytes] = '\0';
 						char *currentPos = buffer;
+						while (currentPos != NULL && *currentPos != '\0' && (currentPos - buffer) < bytes) {
+							char *args[1024];
+							
+							if (*currentPos == '+') {
+								char *newline = strstr(currentPos, "\r\n");
+								if (newline) {
+									currentPos = newline + 2;
+									continue;
+								}
+								break;
+							}
+							
+							if (*currentPos == '$') {
+								int len = atoi(currentPos + 1);
+								char *end_of_header = strstr(currentPos, "\r\n");
+								if (end_of_header) {
+										currentPos = end_of_header + 2 + len;
+										continue;
+								}
+								break;
+							}
+							
+							if (*currentPos == '*') {
+								int argsCount = parseRespRequest(currentPos, args);
+								
+								if (argsCount > 0) {
 
-            while (currentPos != NULL && *currentPos != '\0') {
-              char *args[1024];
-              
-              int argsCount = parseRespRequest(currentPos, args);
-              
-              if (argsCount > 0) {
-                char responseBuffer[BUFFER_SIZE];
-                responseBuffer[0] = '\0';
-                
-                execute(args, argsCount, responseBuffer, polls[i].fd, &clientSessions[i]);
-                
-                if (responseBuffer[0] != '\0' && clientSessions[i].masterFd == polls[i].fd) {
-                  write(polls[i].fd, responseBuffer, strlen(responseBuffer));
-                }
-
-                for (int j = 0; j < argsCount; j++) {
-                  free(args[j]);
-                }
-              }
-
-              currentPos = strchr(currentPos + 1, '*');
-            }
+									char responseBuffer[BUFFER_SIZE];
+									responseBuffer[0] = '\0';
+									bool isGetAck = (argsCount >= 2 && strcasecmp(args[0], "REPLCONF") == 0 && strcasecmp(args[1], "GETACK") == 0);
+									if (polls[i].fd == serverMasterFd && !isGetAck) {
+										int bytes = calculateCommandBytes(args, argsCount);
+										printf("FD=%d, CMD=%s, BYTES=%d, OFFSET was %d", polls[i].fd, args[0], bytes, replicaOffset);
+										replicaOffset += bytes;
+										printf(" -> now %d\n", replicaOffset);
+									}
+									execute(args, argsCount, responseBuffer, polls[i].fd, &clientSessions[i]);
+									
+									if (responseBuffer[0] != '\0') {
+										if(serverMasterFd != polls[i].fd) {
+											write(polls[i].fd, responseBuffer, strlen(responseBuffer));
+										} else if(isGetAck) {
+										printf("%s\n", responseBuffer);
+											write(polls[i].fd, responseBuffer, strlen(responseBuffer));
+										}
+									}
+									
+									for (int j = 0; j < argsCount; j++) {
+											free(args[j]);
+									}
+								}
+								
+								char *next_cmd = strstr(currentPos + 1, "*");
+								if (next_cmd) {
+									currentPos = next_cmd;
+								} else {
+									break;
+								}
+							} else {
+								currentPos++;
+							}
+						}
 					}
 				}
 			}

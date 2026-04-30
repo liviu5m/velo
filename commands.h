@@ -18,7 +18,7 @@ void type(char *args[], int argsCount, char *responseBuffer, struct clientSessio
 void incr(char *args[], int argsCount, char *responseBuffer, struct clientSession *clientSession);
 void multi(char *responseBuffer, struct clientSession *clientSession, int clientFd);
 void info(char *serverRole, char *masterReplicationId, char *masterReplicationOffset, char *responseBuffer);
-void replconf(char *responseBuffer);
+void replconf(char *responseBuffer, char *args[], int argsCount, int replicaOffset);
 void psync(char *responseBuffer, char *masterReplicationId, int clientFd, int *replicaFds, int *replicaCount);
 void pong(char *responseBuffer);
 void propagate(char *args[], int argsCount, int *replicaFds, int replicaCount);

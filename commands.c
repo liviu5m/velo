@@ -213,7 +213,6 @@ void type(char *args[], int argsCount, char *responseBuffer, struct clientSessio
 void incr(char *args[], int argsCount, char *responseBuffer, struct clientSession *clientSession) {
   notifiyKeyChange(args[1], clientSession);
   for(int i = 0;i<keyCount;i++) {
-    printf("Checking key: %s\n", keys[i].key);
     if(strcmp(args[1], keys[i].key) == 0 && (keys[i].expireAt == 0 || keys[i].expireAt > get_current_time_ms())) {
       if(atoll(keys[i].value) != 0) {
         long long value = atoll(keys[i].value);
@@ -248,12 +247,17 @@ void multi(char *responseBuffer, struct clientSession *clientSession, int client
 void info(char *serverRole, char *masterReplicationId, char *masterReplicationOffset, char *responseBuffer) {
   char el[256];
   sprintf(el, "role:%s\r\nmaster_replid:%s\r\nmaster_repl_offset:%s\r\n", serverRole, masterReplicationId, masterReplicationOffset);
-  printf("INFO response: %s", el);
   sprintf(responseBuffer,"$%zu\r\n%s\r\n", strlen(el), el);
 }
 
-void replconf(char *responseBuffer) {
-  strcpy(responseBuffer, "+OK\r\n");
+void replconf(char *responseBuffer, char *args[], int argsCount, int replicaOffset) {
+  if(argsCount >= 2 && strcasecmp(args[1], "GETACK") == 0) {
+    char offsetStr[32];
+    sprintf(offsetStr, "%d", replicaOffset);
+    sprintf(responseBuffer, "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$%zu\r\n%s\r\n", strlen(offsetStr), offsetStr);
+  }else {
+    strcpy(responseBuffer, "+OK\r\n");
+  }
 }
 
 void psync(char *responseBuffer, char *masterReplicationId, int clientFd, int *replicaFds, int *replicaCount) {
